@@ -19,6 +19,7 @@ from sklearn.metrics import f1_score
 class GraphEmbedding(nn.Module):
     def __init__(self, config, embedding, new_embedding, graph_type='GAT', layer=1, path_list=None, data_path=None):
         super(GraphEmbedding, self).__init__()
+        self.config = config  # <--- 新增这一行：将 config 保存为类属性
         self.graph_type = graph_type
         padding_idx = config.pad_token_id
         self.num_class = config.num_labels
