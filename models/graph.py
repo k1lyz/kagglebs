@@ -273,24 +273,68 @@ class GraphEncoder(nn.Module):
         else:
             self.path_list = nn.Parameter(torch.tensor(path_list).transpose(0, 1), requires_grad=False)
 
-    def forward(self, label_emb, embeddings):
+
+
+    def forward(self, label_emb, embeddings, text_features=None):
         extra_attn = None
+        # 获取 Batch 大小，区分是初始化还是动态前向推理
+        B = text_features.size(0) if text_features is not None else 1
 
         if self.graph_type == 'graphormer':
             label_mask = self.label_name != self.tokenizer.pad_token_id
-            # full name
             label_name_emb = embeddings(self.label_name)
             label_emb = label_emb + (label_name_emb * label_mask.unsqueeze(-1)).sum(dim=1) / label_mask.sum(dim=1).unsqueeze(-1)
 
-            label_emb = label_emb + self.id_embedding(self.label_id[:, None]).view(-1,
-                                                                        self.config.hidden_size)
+            label_emb = label_emb + self.id_embedding(self.label_id[:, None]).view(-1, self.config.hidden_size)
             extra_attn = self.distance_embedding(self.distance_mat) + self.edge_embedding(self.edge_mat).sum(
                 dim=1) / (self.distance_mat.view(-1, 1) + 1e-8)
             extra_attn = extra_attn.view(self.label_num, self.label_num)
+            
+            # 将静态特征扩展到 Batch 维度: [B, num_labels, H]
+            label_emb = label_emb.unsqueeze(0).expand(B, -1, -1).clone()
+            extra_attn = extra_attn.unsqueeze(0).expand(B, -1, -1).clone()
+
+            # ======= 核心创新点一：文本引导的动态图结构 =======
+            if text_features is not None:
+                text_proj = text_features.unsqueeze(1) 
+                # 计算文本与当前所有标签的语义相似度
+                label_text_sim = torch.bmm(label_emb, text_proj.transpose(1, 2))
+                dynamic_weights = torch.sigmoid(label_text_sim / (self.config.hidden_size ** 0.5))
+                
+                # 开关A：动态节点门控缩放
+                if getattr(self.config, 'use_dynamic_node', False):
+                    label_emb = label_emb * dynamic_weights
+                
+                # 开关B：动态图拓扑/边权叠加
+                if getattr(self.config, 'use_dynamic_edge', False):
+                    dynamic_adj = torch.bmm(dynamic_weights, dynamic_weights.transpose(1, 2))
+                    extra_attn = extra_attn + dynamic_adj
+            # =================================================
+
+            for hir_layer in self.hir_layers:
+                label_emb = hir_layer(label_emb, extra_attn)
+
         elif self.graph_type == 'GCN' or self.graph_type == 'GAT':
+            # 解决 PyG 库不支持 3D Batch 的显存安全方案
             extra_attn = self.path_list
+            out_embs = []
+            
+            for b in range(B):
+                b_emb = label_emb.clone() 
+                
+                if text_features is not None:
+                    text_proj = text_features[b].unsqueeze(-1) 
+                    gate = torch.sigmoid(torch.mm(b_emb, text_proj) / (self.config.hidden_size ** 0.5))
+                    
+                    # GCN/GAT 的动态节点门控
+                    if getattr(self.config, 'use_dynamic_node', False):
+                        b_emb = b_emb * gate 
+                        
+                for hir_layer in self.hir_layers:
+                    b_emb = hir_layer(b_emb.unsqueeze(0), extra_attn).squeeze(0)
+                
+                out_embs.append(b_emb)
+                
+            label_emb = torch.stack(out_embs, dim=0)
 
-        for hir_layer in self.hir_layers:
-            label_emb = hir_layer(label_emb.unsqueeze(0), extra_attn)
-
-        return label_emb.squeeze(0)
+        return label_emb
