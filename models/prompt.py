@@ -55,10 +55,41 @@ class GraphEmbedding(nn.Module):
 
         return foo
 
+    #新增：将原先GraphEmbedding类里面的forward函数，完全替换为以下代码
     def forward(self, x):
-        x = F.embedding(x, self.weight(), self.padding_idx)
+        # 1. 获取基础嵌入
+        base_embeds = F.embedding(x, self.raw_weight(), self.padding_idx)
 
-        return x
+        if self.graph_type != '':
+            # 2. 提取真实文本特征，过滤掉 padding 和 prompt 占位符
+            text_mask = (x < self.original_embedding.num_embeddings) & (x != self.padding_idx)
+            text_features = (base_embeds * text_mask.unsqueeze(-1)).sum(dim=1) / (text_mask.sum(dim=1, keepdim=True) + 1e-8)
+
+            # === 消融实验 Variant C 拦截逻辑 ===
+            if getattr(self.config, 'use_random_text', False):
+                # 用同分布的随机高斯噪声替换真实的文本特征
+                text_features = torch.randn_like(text_features) * text_features.std() + text_features.mean()
+            # ==================================
+
+            label_features = self.new_embedding.weight[1:-1, :]
+
+            # 3. 传入图网络，附带文本特征进行实例级动态生成
+            dynamic_label_features = self.graph(label_features, self.original_embedding, text_features=text_features)
+
+            V = self.original_embedding.num_embeddings
+            num_labels = dynamic_label_features.size(1)
+
+            label_token_mask = (x >= V) & (x < V + num_labels)
+            batch_indices, seq_indices = torch.where(label_token_mask)
+            label_indices = x[batch_indices, seq_indices] - V
+
+            # 4. 把动态生成的、具备句子特异性的图特征替换回序列中
+            base_embeds[batch_indices, seq_indices] = dynamic_label_features[batch_indices, label_indices]
+
+        return base_embeds
+
+
+
 
 
 class Prompt(BertPreTrainedModel):
