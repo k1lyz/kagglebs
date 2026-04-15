@@ -42,9 +42,6 @@ def parse():
     parser.add_argument('--use_dynamic_edge', default=False, action='store_true', help='启用动态边权(图拓扑)融合')
     parser.add_argument('--use_random_text', default=False, action='store_true', help='传入随机噪声代替真实文本以作验证')
 
-
-
-    
     return parser
 
 
@@ -70,9 +67,29 @@ if __name__ == '__main__':
     parser = parse()
     args, unknown = parser.parse_known_args()
 
+    # ========================================================
+    # 修复：第一步，先执行自动重命名逻辑，把 args.name 拼接完整
+    # ========================================================
+    exp_suffix = ""
+    if getattr(args, 'use_dynamic_node', False):
+        exp_suffix += "_node"
+    if getattr(args, 'use_dynamic_edge', False):
+        exp_suffix += "_edge"
+    if getattr(args, 'use_random_text', False):
+        exp_suffix += "_rand"
+        
+    if exp_suffix:
+        args.name = args.name + exp_suffix
+
+    args.name = args.data + '-' + args.name
+
+    # ========================================================
+    # 第二步：此时 args.name 已经是完整版了，再去初始化 SwanLab
+    # ========================================================
     if args.wandb:
         swanlab.login(api_key='DQ5WCNvv4ra2WikI9c59a', save=False)
-        swanlab.init(config=vars(args), project='bs',name=args.name)
+        swanlab.init(config=vars(args), project='bs', name=args.name)
+        
     print(args)
     utils.seed_torch(args.seed)
 
@@ -89,31 +106,14 @@ if __name__ == '__main__':
         WORKING_DIR = current_dir
         data_path = os.path.join(current_dir, 'data', args.data)  # 指向本地项目里的 data 文件夹
 
-    working_data_path = os.path.join(WORKING_DIR, 'data_cache', args.data)  # 可写：缓存生成路径 (改了个名字避免和原data混淆)
+    working_data_path = os.path.join(WORKING_DIR, 'data_cache', args.data)  # 可写：缓存生成路径 
     checkpoints_dir = os.path.join(WORKING_DIR, 'checkpoints')  # 可写：权重保存路径
-
-    # === 新增：根据消融实验开关自动重命名实验，避免权重互相覆盖 ===
-    exp_suffix = ""
-    if args.use_dynamic_node:
-        exp_suffix += "_node"
-    if args.use_dynamic_edge:
-        exp_suffix += "_edge"
-    if args.use_random_text:
-        exp_suffix += "_rand"
-        
-    if exp_suffix:
-        args.name = args.name + exp_suffix
-
-    args.name = args.data + '-' + args.name
 
     os.makedirs(working_data_path, exist_ok=True)
     os.makedirs(os.path.join(checkpoints_dir, args.name), exist_ok=True)
 
     batch_size = args.batch
 
-
-
-    
     # 读取基础字典
     label_dict = torch.load(os.path.join(data_path, 'value_dict.pt'), weights_only=False)
     label_dict = {i: v for i, v in label_dict.items()}
@@ -132,14 +132,12 @@ if __name__ == '__main__':
         if i not in value2slot:
             value2slot[i] = -1
 
-
     def get_depth(x):
         depth = 0
         while value2slot[x] != -1:
             depth += 1
             x = value2slot[x]
         return depth
-
 
     depth_dict = {i: get_depth(i) for i in range(num_class)}
     max_depth = depth_dict[max(depth_dict, key=depth_dict.get)] + 1
@@ -166,7 +164,6 @@ if __name__ == '__main__':
                 prefix.append(tokenizer.vocab_size + num_class + max_depth)
             prefix.append(tokenizer.sep_token_id)
 
-
             def data_map_function(batch, tokenizer):
                 new_batch = {'input_ids': [], 'token_type_ids': [], 'attention_mask': [], 'labels': []}
                 for l, t in zip(batch['label'], batch['token']):
@@ -189,7 +186,6 @@ if __name__ == '__main__':
                     new_batch['token_type_ids'].append([0] * 512)
 
                 return new_batch
-
 
             dataset = dataset.map(lambda x: data_map_function(x, tokenizer), batched=True)
             # 生成的数据集缓存存入 /kaggle/working
@@ -222,10 +218,6 @@ if __name__ == '__main__':
     model.config.use_dynamic_edge = args.use_dynamic_edge
     model.config.use_random_text = args.use_random_text
 
-
-
-
-    
     model.init_embedding()
     model.to('cuda')
 
@@ -318,7 +310,6 @@ if __name__ == '__main__':
     test = DataLoader(dataset['test'], batch_size=8, shuffle=False)
     model.eval()
 
-
     def test_function(extra):
         # 权重加载同样要加上 weights_only=False，并指向 /kaggle/working/checkpoints
         checkpoint = torch.load(os.path.join(checkpoints_dir, args.name, f'checkpoint_best{extra}.pt'),
@@ -351,6 +342,5 @@ if __name__ == '__main__':
             prefix = 'test' + extra
         if args.wandb:
             swanlab.log({prefix + '_macro': macro_f1, prefix + '_micro': micro_f1})
-
 
     test_function('_macro')
