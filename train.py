@@ -36,6 +36,15 @@ def parse():
     parser.add_argument('--graph', type=str, default='GAT')
     parser.add_argument('--low-res', default=False, action='store_true')
     parser.add_argument('--seed', default=3, type=int)
+
+    # === 新增：创新点1 与 消融实验开关 ===
+    parser.add_argument('--use_dynamic_node', default=False, action='store_true', help='启用节点特征动态门控')
+    parser.add_argument('--use_dynamic_edge', default=False, action='store_true', help='启用动态边权(图拓扑)融合')
+    parser.add_argument('--use_random_text', default=False, action='store_true', help='传入随机噪声代替真实文本以作验证')
+
+
+
+    
     return parser
 
 
@@ -83,12 +92,28 @@ if __name__ == '__main__':
     working_data_path = os.path.join(WORKING_DIR, 'data_cache', args.data)  # 可写：缓存生成路径 (改了个名字避免和原data混淆)
     checkpoints_dir = os.path.join(WORKING_DIR, 'checkpoints')  # 可写：权重保存路径
 
-    os.makedirs(working_data_path, exist_ok=True)
-    os.makedirs(os.path.join(checkpoints_dir, args.data + '-' + args.name), exist_ok=True)
+    # === 新增：根据消融实验开关自动重命名实验，避免权重互相覆盖 ===
+    exp_suffix = ""
+    if args.use_dynamic_node:
+        exp_suffix += "_node"
+    if args.use_dynamic_edge:
+        exp_suffix += "_edge"
+    if args.use_random_text:
+        exp_suffix += "_rand"
+        
+    if exp_suffix:
+        args.name = args.name + exp_suffix
 
     args.name = args.data + '-' + args.name
+
+    os.makedirs(working_data_path, exist_ok=True)
+    os.makedirs(os.path.join(checkpoints_dir, args.name), exist_ok=True)
+
     batch_size = args.batch
 
+
+
+    
     # 读取基础字典
     label_dict = torch.load(os.path.join(data_path, 'value_dict.pt'), weights_only=False)
     label_dict = {i: v for i, v in label_dict.items()}
@@ -191,6 +216,16 @@ if __name__ == '__main__':
 
     model = Prompt.from_pretrained(args.arch, num_labels=len(label_dict), path_list=path_list, layer=args.layer,
                                    graph_type=args.graph, data_path=data_path, depth2label=depth2label, )
+
+    # === 新增：将消融实验开关注入到 config，供内部网络读取 ===
+    model.config.use_dynamic_node = args.use_dynamic_node
+    model.config.use_dynamic_edge = args.use_dynamic_edge
+    model.config.use_random_text = args.use_random_text
+
+
+
+
+    
     model.init_embedding()
     model.to('cuda')
 
